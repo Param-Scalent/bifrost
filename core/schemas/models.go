@@ -41,7 +41,8 @@ func (k KeyStatus) MarshalJSON() ([]byte, error) {
 }
 
 type BifrostListModelsRequest struct {
-	Provider ModelProvider `json:"provider"`
+	Provider  ModelProvider `json:"provider"`
+	Fallbacks []Fallback    `json:"-"`
 
 	PageSize int `json:"page_size"`
 

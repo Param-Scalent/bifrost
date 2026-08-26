@@ -3,16 +3,40 @@ package handlers
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
+
+type listModelsTestAccount struct {
+	configs map[schemas.ModelProvider]*schemas.ProviderConfig
+	keys    map[schemas.ModelProvider][]schemas.Key
+}
+
+func (a *listModelsTestAccount) GetConfiguredProviders() ([]schemas.ModelProvider, error) {
+	providers := make([]schemas.ModelProvider, 0, len(a.configs))
+	for provider := range a.configs {
+		providers = append(providers, provider)
+	}
+	return providers, nil
+}
+
+func (a *listModelsTestAccount) GetKeysForProvider(_ context.Context, provider schemas.ModelProvider) ([]schemas.Key, error) {
+	return a.keys[provider], nil
+}
+
+func (a *listModelsTestAccount) GetConfigForProvider(provider schemas.ModelProvider) (*schemas.ProviderConfig, error) {
+	return a.configs[provider], nil
+}
 
 type mockListModelsVKConfigStore struct {
 	configstore.ConfigStore
@@ -142,5 +166,80 @@ func TestApplyListModelsVirtualKeyProviderFilterSkipsInactiveVK(t *testing.T) {
 	}
 	if got := bifrostCtx.Value(schemas.BifrostContextKeyAvailableProviders); got != nil {
 		t.Fatalf("expected inactive VK not to set available providers, got %#v", got)
+	}
+}
+
+// TestListModels_VKOnlyAllowedProviderReturnsAllowedModels verifies that the aggregate endpoint returns only models from providers allowed by the VK.
+func TestListModels_VKOnlyAllowedProviderReturnsAllowedModels(t *testing.T) {
+	openRouterRequests := 0
+	openRouterServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openRouterRequests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"openrouter-test-model","object":"model","created":1,"owned_by":"openrouter"}]}`))
+	}))
+	defer openRouterServer.Close()
+
+	anthropicRequests := 0
+	anthropicServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		anthropicRequests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"anthropic-must-not-appear","object":"model"}]}`))
+	}))
+	defer anthropicServer.Close()
+
+	account := &listModelsTestAccount{
+		configs: map[schemas.ModelProvider]*schemas.ProviderConfig{
+			schemas.OpenRouter: {
+				NetworkConfig: schemas.NetworkConfig{BaseURL: openRouterServer.URL},
+			},
+			schemas.Anthropic: {
+				NetworkConfig: schemas.NetworkConfig{BaseURL: anthropicServer.URL},
+			},
+		},
+		keys: map[schemas.ModelProvider][]schemas.Key{
+			schemas.OpenRouter: {{ID: "openrouter-key", Value: *schemas.NewSecretVar("sk-openrouter-test"), Models: schemas.WhiteList{"*"}, Weight: 1}},
+			schemas.Anthropic:  {{ID: "anthropic-key", Value: *schemas.NewSecretVar("sk-anthropic-test"), Models: schemas.WhiteList{"*"}, Weight: 1}},
+		},
+	}
+
+	client, err := bifrost.Init(context.Background(), schemas.BifrostConfig{Account: account})
+	if err != nil {
+		t.Fatalf("failed to initialize Bifrost: %v", err)
+	}
+	defer client.Shutdown()
+
+	configStore := &mockListModelsVKConfigStore{vk: &configstoreTables.TableVirtualKey{
+		Value:    *schemas.NewSecretVar("sk-bf-openrouter-only"),
+		IsActive: new(true),
+		ProviderConfigs: []configstoreTables.TableVirtualKeyProviderConfig{
+			{Provider: string(schemas.OpenRouter), AllowedModels: schemas.WhiteList{"*"}},
+		},
+	}}
+	h := NewInferenceHandler(client, &lib.Config{
+		ConfigStore:  configStore,
+		ClientConfig: new(configstore.ClientConfig),
+	})
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod("GET")
+	ctx.Request.SetRequestURI("/v1/models")
+	ctx.Request.Header.Set("Authorization", "Bearer sk-bf-openrouter-only")
+	h.listModels(ctx)
+
+	if got := ctx.Response.StatusCode(); got != fasthttp.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", got, ctx.Response.Body())
+	}
+	body := string(ctx.Response.Body())
+	if !strings.Contains(body, "openrouter-test-model") {
+		t.Fatalf("expected OpenRouter model in response, got %s", body)
+	}
+	if strings.Contains(body, "anthropic-must-not-appear") {
+		t.Fatalf("Anthropic model unexpectedly appeared in response: %s", body)
+	}
+	if openRouterRequests == 0 {
+		t.Fatal("expected OpenRouter server to receive a list-model request")
+	}
+	if anthropicRequests != 0 {
+		t.Fatalf("expected Anthropic server to receive no requests, got %d", anthropicRequests)
 	}
 }

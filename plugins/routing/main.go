@@ -271,7 +271,7 @@ func (p *RoutingPlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *sche
 	}
 
 	provider, model, _ := req.GetRequestFields()
-	if model == "" {
+	if model == "" && req.RequestType != schemas.ListModelsRequest {
 		return nil, nil
 	}
 
