@@ -287,7 +287,7 @@ func (r *BudgetResolver) EvaluateVirtualKeyRequest(ctx *schemas.BifrostContext, 
 	// VK does configure keeps its model allowlist.
 	providerUnconfigured := skipProviderCheck && !r.isProviderAllowed(vk, provider)
 	// 2. Check provider filtering
-	if !skipProviderCheck && requestType != schemas.MCPToolExecutionRequest && requestType != schemas.ListModelsRequest && !r.isProviderAllowed(vk, provider) {
+	if !skipProviderCheck && requestType != schemas.MCPToolExecutionRequest && !r.isProviderAllowed(vk, provider) {
 		return &EvaluationResult{
 			Decision:   DecisionProviderBlocked,
 			Reason:     fmt.Sprintf("Provider '%s' is not allowed for this virtual key", provider),

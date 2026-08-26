@@ -3,6 +3,8 @@ package bifrost
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"sync"
@@ -12,6 +14,8 @@ import (
 
 	mistralprovider "github.com/maximhq/bifrost/core/providers/mistral"
 	schemas "github.com/maximhq/bifrost/core/schemas"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -2861,6 +2865,77 @@ func TestFilterKeysByID(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestGetAllSupportedKeys_ListModelsHonorsPinnedKey(t *testing.T) {
+	account := NewMockAccount()
+	account.AddProvider(schemas.OpenRouter, 1, 1)
+	account.SetKeysForProvider(schemas.OpenRouter, []schemas.Key{
+		{ID: "openrouter-key-a", Value: *schemas.NewSecretVar("key-a")},
+		{ID: "openrouter-key-b", Value: *schemas.NewSecretVar("key-b")},
+	})
+
+	client, err := Init(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), schemas.BifrostConfig{
+		Account: account,
+		Logger:  NewDefaultLogger(schemas.LogLevelError),
+	})
+	require.NoError(t, err)
+	defer client.Shutdown()
+
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	ctx.SetValue(schemas.BifrostContextKeyAPIKeyID, "openrouter-key-b")
+
+	keys, err := client.getAllSupportedKeys(ctx, schemas.OpenRouter, schemas.OpenRouter)
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	assert.Equal(t, "openrouter-key-b", keys[0].ID)
+}
+
+func TestListModelsRequest_UsesConfiguredFallback(t *testing.T) {
+	var primaryCalls atomic.Int32
+	var fallbackCalls atomic.Int32
+
+	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls.Add(1)
+		http.Error(w, "primary unavailable", http.StatusBadGateway)
+	}))
+	defer primaryServer.Close()
+	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fallbackCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"fallback-model","object":"model"}]}`))
+	}))
+	defer fallbackServer.Close()
+
+	account := NewMockAccount()
+	account.AddProviderWithBaseURL(schemas.OpenAI, 1, 1, primaryServer.URL)
+	account.AddProviderWithBaseURL(schemas.OpenRouter, 1, 1, fallbackServer.URL)
+	account.SetKeysForProvider(schemas.OpenAI, []schemas.Key{{
+		ID: "primary-key", Value: *schemas.NewSecretVar("primary"), Models: schemas.WhiteList{"*"},
+	}})
+	account.SetKeysForProvider(schemas.OpenRouter, []schemas.Key{{
+		ID: "fallback-key", Value: *schemas.NewSecretVar("fallback"), Models: schemas.WhiteList{"*"},
+	}})
+
+	client, err := Init(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), schemas.BifrostConfig{
+		Account: account,
+		Logger:  NewDefaultLogger(schemas.LogLevelError),
+	})
+	require.NoError(t, err)
+	defer client.Shutdown()
+
+	response, bifrostErr := client.ListModelsRequest(schemas.NewBifrostContext(context.Background(), schemas.NoDeadline), &schemas.BifrostListModelsRequest{
+		Provider: schemas.OpenAI,
+		Fallbacks: []schemas.Fallback{{
+			Provider: schemas.OpenRouter,
+		}},
+	})
+	require.Nil(t, bifrostErr)
+	require.NotNil(t, response)
+	require.Len(t, response.Data, 1)
+	assert.Equal(t, "openrouter/fallback-model", response.Data[0].ID)
+	assert.Greater(t, primaryCalls.Load(), int32(0))
+	assert.GreaterOrEqual(t, fallbackCalls.Load(), int32(1))
 }
 
 // fakeRoutingPlugin is a minimal LLMPlugin whose PreRequestHook writes a routing key pin to the

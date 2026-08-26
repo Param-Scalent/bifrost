@@ -587,7 +587,7 @@ type BifrostRequest struct {
 func (br *BifrostRequest) GetRequestFields() (provider ModelProvider, model string, fallbacks []Fallback) {
 	switch {
 	case br.ListModelsRequest != nil:
-		return br.ListModelsRequest.Provider, "", nil
+		return br.ListModelsRequest.Provider, "", br.ListModelsRequest.Fallbacks
 	case br.TextCompletionRequest != nil:
 		return br.TextCompletionRequest.Provider, br.TextCompletionRequest.Model, br.TextCompletionRequest.Fallbacks
 	case br.ChatRequest != nil:
@@ -861,6 +861,8 @@ func (br *BifrostRequest) SetModel(model string) {
 
 func (br *BifrostRequest) SetFallbacks(fallbacks []Fallback) {
 	switch {
+	case br.ListModelsRequest != nil:
+		br.ListModelsRequest.Fallbacks = fallbacks
 	case br.TextCompletionRequest != nil:
 		br.TextCompletionRequest.Fallbacks = fallbacks
 	case br.ChatRequest != nil:

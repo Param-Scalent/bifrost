@@ -66,6 +66,136 @@ func TestApplyRoutingRules_PinnedKeyReachesContext(t *testing.T) {
 		"routing-rule pinned key_id must reach BifrostContextKeyRoutingPinnedAPIKeyID that selectKeyFromProviderForModelWithPool reads")
 }
 
+func TestApplyRoutingRules_ListModelsRoutesProviderKeyAndFallback(t *testing.T) {
+	const pinnedKeyID = "list-models-key"
+
+	store, err := rules.NewLocalStore(context.Background(), rules.NewMockLogger(), nil)
+	require.NoError(t, err)
+	require.NoError(t, store.UpsertRule(context.Background(), &configstoreTables.TableRoutingRule{
+		ID:            "list-models-route",
+		Name:          "Route List Models",
+		CelExpression: "request_type == 'list_models'",
+		Targets: []configstoreTables.TableRoutingTarget{{
+			Provider: bifrost.Ptr("openrouter"),
+			KeyID:    bifrost.Ptr(pinnedKeyID),
+			Weight:   1.0,
+		}, {
+			Provider: bifrost.Ptr("anthropic"),
+			Weight:   0.0,
+		}},
+		Fallbacks:       bifrost.Ptr(`["anthropic/"]`),
+		ParsedFallbacks: []string{"anthropic/"},
+		Enabled:         bifrost.Ptr(true),
+		Scope:           "global",
+		Priority:        0,
+	}))
+	assert.Equal(t, []string{"anthropic/"}, store.GetScopedRules(context.Background(), "global", "")[0].ParsedFallbacks)
+
+	plugin, err := InitFromStore(context.Background(), nil, rules.NewMockLogger(), nil, store, NewMockGovernance())
+	require.NoError(t, err)
+
+	req := &schemas.BifrostRequest{
+		RequestType:       schemas.ListModelsRequest,
+		ListModelsRequest: &schemas.BifrostListModelsRequest{Provider: schemas.OpenAI},
+	}
+	ctx := schemas.NewBifrostContext(context.Background(), time.Now())
+	ctx.BlockRestrictedWrites()
+
+	decision, err := plugin.applyRoutingRules(ctx, req, nil)
+	require.NoError(t, err)
+	require.NotNil(t, decision)
+	provider, model, fallbacks := req.GetRequestFields()
+
+	assert.Equal(t, schemas.OpenRouter, provider)
+	assert.Empty(t, model)
+	assert.Equal(t, []schemas.Fallback{{Provider: schemas.Anthropic}}, fallbacks)
+	assert.Equal(t, pinnedKeyID, decision.KeyID)
+	assert.Equal(t, pinnedKeyID, ctx.Value(schemas.BifrostContextKeyRoutingPinnedAPIKeyID))
+}
+
+func TestApplyRoutingRules_ListModelsProviderCondition(t *testing.T) {
+	store, err := rules.NewLocalStore(context.Background(), rules.NewMockLogger(), nil)
+	require.NoError(t, err)
+	require.NoError(t, store.UpsertRule(context.Background(), &configstoreTables.TableRoutingRule{
+		ID:            "list-models-provider-condition",
+		Name:          "Route OpenRouter List Models",
+		CelExpression: `request_type == "list_models" && provider == "openrouter"`,
+		Targets: []configstoreTables.TableRoutingTarget{{
+			Provider: bifrost.Ptr("openrouter"),
+			Weight:   1.0,
+		}},
+		Enabled:  bifrost.Ptr(true),
+		Scope:    "global",
+		Priority: 0,
+	}))
+
+	plugin, err := InitFromStore(context.Background(), nil, rules.NewMockLogger(), nil, store, NewMockGovernance())
+	require.NoError(t, err)
+
+	t.Run("matching provider evaluates rule", func(t *testing.T) {
+		req := &schemas.BifrostRequest{
+			RequestType:       schemas.ListModelsRequest,
+			ListModelsRequest: &schemas.BifrostListModelsRequest{Provider: schemas.OpenRouter},
+		}
+		ctx := schemas.NewBifrostContext(context.Background(), time.Now())
+
+		decision, err := plugin.applyRoutingRules(ctx, req, nil)
+		require.NoError(t, err)
+		require.NotNil(t, decision)
+		provider, _, _ := req.GetRequestFields()
+		assert.Equal(t, schemas.OpenRouter, provider)
+	})
+
+	t.Run("different provider does not match", func(t *testing.T) {
+		req := &schemas.BifrostRequest{
+			RequestType:       schemas.ListModelsRequest,
+			ListModelsRequest: &schemas.BifrostListModelsRequest{Provider: schemas.OpenAI},
+		}
+		ctx := schemas.NewBifrostContext(context.Background(), time.Now())
+
+		decision, err := plugin.applyRoutingRules(ctx, req, nil)
+		require.NoError(t, err)
+		assert.Nil(t, decision)
+		provider, _, _ := req.GetRequestFields()
+		assert.Equal(t, schemas.OpenAI, provider)
+	})
+}
+
+func TestApplyRoutingRules_ListModelsNoMatchingRulePreservesRequest(t *testing.T) {
+	store, err := rules.NewLocalStore(context.Background(), rules.NewMockLogger(), nil)
+	require.NoError(t, err)
+	require.NoError(t, store.UpsertRule(context.Background(), &configstoreTables.TableRoutingRule{
+		ID:            "chat-only-rule",
+		Name:          "Chat Only",
+		CelExpression: `request_type == "chat_completion"`,
+		Targets: []configstoreTables.TableRoutingTarget{{
+			Provider: bifrost.Ptr("anthropic"),
+			Model:    bifrost.Ptr("claude-sonnet-4"),
+			Weight:   1.0,
+		}},
+		Enabled:  bifrost.Ptr(true),
+		Scope:    "global",
+		Priority: 0,
+	}))
+
+	plugin, err := InitFromStore(context.Background(), nil, rules.NewMockLogger(), nil, store, NewMockGovernance())
+	require.NoError(t, err)
+
+	req := &schemas.BifrostRequest{
+		RequestType:       schemas.ListModelsRequest,
+		ListModelsRequest: &schemas.BifrostListModelsRequest{Provider: schemas.OpenRouter},
+	}
+	ctx := schemas.NewBifrostContext(context.Background(), time.Now())
+
+	decision, err := plugin.applyRoutingRules(ctx, req, nil)
+	require.NoError(t, err)
+	assert.Nil(t, decision)
+	provider, model, fallbacks := req.GetRequestFields()
+	assert.Equal(t, schemas.OpenRouter, provider)
+	assert.Empty(t, model)
+	assert.Empty(t, fallbacks)
+}
+
 // TestPreRequestHook_MaterializesVirtualKeyRoutingAfterRules pins the ordering this plugin
 // exists to guarantee: a matched rule rewrites the model, and both the provider allowlist and
 // the load balancer must then run against the rewritten model, not the one the caller sent.

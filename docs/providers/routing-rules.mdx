@@ -69,7 +69,7 @@ Routing rules evaluate CEL expressions with these available variables:
 ```cel
 model          // Requested model (string)
 provider       // Current provider (string)
-request_type   // Request type (chat_completion, embedding, batch, image_generation, moderation, transcription, translation)
+request_type   // Request type (chat_completion, list_models, embedding, batch, image_generation, moderation, transcription, translation)
 ```
 
 #### Headers & Parameters
@@ -202,6 +202,11 @@ model == "gpt-4o"
 
 // Route based on request type
 request_type == "embedding"
+
+// Route model-list requests to a specific provider and key
+request_type == "list_models"
+
+// Example target: provider=openrouter, key_id=provider-key-uuid
 
 // Route to fallback when budget high
 budget_used > 80

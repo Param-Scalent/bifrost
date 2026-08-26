@@ -5160,6 +5160,12 @@ func (bifrost *Bifrost) prepareFallbackRequest(req *schemas.BifrostRequest, fall
 		tmp.Model = fallback.Model
 		fallbackReq.VideoGenerationRequest = &tmp
 	}
+	if req.ListModelsRequest != nil {
+		tmp := *req.ListModelsRequest
+		tmp.Provider = fallback.Provider
+		tmp.Fallbacks = nil
+		fallbackReq.ListModelsRequest = &tmp
+	}
 	return &fallbackReq
 }
 
@@ -6454,7 +6460,6 @@ func executeRequestWithRetries[T any](
 
 		// Attempt the request
 		result, bifrostError = requestHandler(currentKey)
-
 		// For streaming requests that returned success, check if the first chunk
 		// is actually an error (e.g., rate limits sent as SSE events in HTTP 200).
 		// This enables retries and fallbacks for providers that embed errors in
@@ -8681,6 +8686,17 @@ func (bifrost *Bifrost) getAllSupportedKeys(ctx *schemas.BifrostContext, provide
 		}
 		if strings.TrimSpace(key.Value.GetValue()) != "" || CanProviderKeyValueBeEmpty(baseProviderType) {
 			supportedKeys = append(supportedKeys, key)
+		}
+	}
+
+	if keyID, ok := ctx.Value(schemas.BifrostContextKeyAPIKeyID).(string); ok {
+		keyID = strings.TrimSpace(keyID)
+		if keyID != "" {
+			filtered := filterKeysByID(supportedKeys, keyID)
+			if len(filtered) == 0 {
+				return nil, fmt.Errorf("no key found with id %q for provider %s", keyID, providerKey)
+			}
+			return filtered, nil
 		}
 	}
 
